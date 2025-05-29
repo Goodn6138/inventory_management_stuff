@@ -5,3 +5,4 @@ openpyxl
 streamlit-webrtc
 gspread
 oauth2client
+xlsxwriter
