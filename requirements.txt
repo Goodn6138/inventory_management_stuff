@@ -4,3 +4,4 @@ pandas
 openpyxl
 streamlit-webrtc
 gspread
+oauth2client
