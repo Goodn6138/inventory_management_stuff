@@ -1,152 +1,124 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
-import os
 import openpyxl
+from openpyxl.styles import PatternFill
+from openpyxl.utils.dataframe import dataframe_to_rows
 
-st.set_page_config("Inventory Manager", layout="wide")
-st.title("📦 Inventory Manager with Confirmation & Edits")
+# Color constants
+GREEN = "#C6EFCE"
+BLUE = "#ADD8E6"
+RED = "#FFC7CE"
+WHITE = "#FFFFFF"
 
-def update_confirmed_column_based_on_color(wb):
-    ws = wb.active
+# Session state storage
+if "confirmed_rows" not in st.session_state:
+    st.session_state.confirmed_rows = []
+if "new_rows" not in st.session_state:
+    st.session_state.new_rows = []
+if "edited_cells" not in st.session_state:
+    st.session_state.edited_cells = set()
 
-    # Get headers and find/create 'CONFIRMED' column
-    headers = [cell.value for cell in ws[1]]
-    if "CONFIRMED" not in headers:
-        confirmed_col_index = len(headers) + 1
-        ws.cell(row=1, column=confirmed_col_index).value = "CONFIRMED"
-    else:
-        confirmed_col_index = headers.index("CONFIRMED") + 1
+st.title("📦 Inventory Management System")
 
-    green_rgb_codes = {
-        "FFC6EFCE",  # Light green from Excel (common highlight)
-        "FF00FF00",  # Standard Excel green
-    }
-
-    for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
-        first_cell = row[0]
-        fill = first_cell.fill
-        rgb = ""
-        if fill and fill.start_color and fill.start_color.type == "rgb":
-            rgb = fill.start_color.rgb
-
-        is_green = rgb in green_rgb_codes
-        ws.cell(row=first_cell.row, column=confirmed_col_index).value = "Y" if is_green else "N"
-
-    return wb
-
-uploaded_file = st.file_uploader("Upload your inventory Excel file", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload Excel Sheet", type=["xlsx"])
 
 if uploaded_file:
-    original_filename = os.path.splitext(uploaded_file.name)[0]
+    # Load Excel sheet
+    df = pd.read_excel(uploaded_file)
 
-    # Load workbook to check colors
-    wb_orig = openpyxl.load_workbook(uploaded_file)
-    wb_orig = update_confirmed_column_based_on_color(wb_orig)
+    # ✅ Remove unnamed columns
+    df = df.loc[:, ~df.columns.str.contains("^Unnamed", case=False)]
 
-    # Save updated original file
-    orig_output = BytesIO()
-    wb_orig.save(orig_output)
-    orig_output.seek(0)
+    # ✅ Add CONFIRMED column based on row color
+    def is_confirmed(row_idx):
+        return "Y" if row_idx in st.session_state.confirmed_rows else "N"
 
-    st.download_button(
-        "💾 Download Original Sheet (with CONFIRMED auto-set from green rows)",
-        orig_output,
-        file_name=f"{original_filename}_with_confirmed.xlsx"
-    )
+    df["CONFIRMED"] = [is_confirmed(i) for i in range(len(df))]
 
-    # Load updated file as dataframe for rest of app
-    df = pd.read_excel(orig_output)
-    df = df.fillna("")
+    # 🔍 Search functionality
+    st.subheader("🔍 Search Machine")
+    query = st.text_input("Enter Serial Number, Name, etc.")
 
-    st.session_state.setdefault("confirmed_rows", set())
-    st.session_state.setdefault("new_rows", set())
-    st.session_state.setdefault("edited_cells", {})
+    if query:
+        results = df[df.astype(str).apply(lambda row: query.lower() in row.str.lower().to_string(), axis=1)]
+        st.write("### Matching Machines")
+        st.dataframe(results, use_container_width=True)
+    else:
+        st.write("ℹ️ Enter a search term to find a machine.")
 
-    st.subheader("🔍 Search for Machine")
-    col_to_search = st.selectbox("Select column to search", df.columns)
-    val_to_search = st.text_input("Enter value to search")
-    search_btn = st.button("🔍 Search")
+    # Display styled dataframe
+    st.write("### 🧾 Machine Records")
 
-    match_indices = []
-    match_df = pd.DataFrame()
+    def highlight_row(row):
+        idx = row.name
+        color = WHITE
+        if idx in st.session_state.confirmed_rows:
+            color = GREEN
+        elif idx in st.session_state.new_rows:
+            color = BLUE
+        return [f"background-color: {color}"] * len(row)
 
-    if search_btn and val_to_search:
-        match_df = df[df[col_to_search].astype(str).str.lower() == val_to_search.lower()]
-        match_indices = match_df.index.tolist()
-        if match_df.empty:
-            st.warning("No match found.")
-        else:
-            st.success(f"Found {len(match_df)} match(es)")
-            st.dataframe(match_df)
+    st.dataframe(df.style.apply(highlight_row, axis=1), use_container_width=True)
 
-    if match_indices:
-        selected_index = match_indices[0]
-        confirm_btn = st.button("✅ Confirm Match")
+    # ✅ Confirm/Edit functionality
+    st.subheader("✅ Confirm or Edit Machines")
+    row_to_confirm = st.number_input("Row number to confirm (0-indexed)", min_value=0, max_value=len(df)-1, step=1)
+    if st.button("Confirm"):
+        if row_to_confirm not in st.session_state.confirmed_rows:
+            st.session_state.confirmed_rows.append(row_to_confirm)
+        df.at[row_to_confirm, "CONFIRMED"] = "Y"
+        st.success(f"Row {row_to_confirm} confirmed ✅")
 
-        if confirm_btn:
-            st.session_state.confirmed_rows.add(selected_index)
-            df.at[selected_index, "CONFIRMED"] = "Y"
-            st.success("Confirmed. Row will be marked green in final sheet.")
+    edited_row = st.number_input("Row number to edit (0-indexed)", min_value=0, max_value=len(df)-1, step=1, key="edit_row")
+    edit_col = st.selectbox("Column to edit", options=df.columns, key="edit_col")
+    new_val = st.text_input("New value", key="edit_val")
 
-        # Edit Row
-        st.subheader("✏️ Edit This Equipment")
-        edited = False
-        for col in df.columns:
-            if col == "CONFIRMED":
-                continue
-            new_val = st.text_input(f"{col}", value=str(df.at[selected_index, col]), key=f"{col}_edit")
-            if new_val != str(df.at[selected_index, col]):
-                df.at[selected_index, col] = new_val
-                st.session_state.edited_cells[(selected_index, col)] = True
-                edited = True
+    if st.button("Edit"):
+        old_val = df.at[edited_row, edit_col]
+        if new_val and str(new_val) != str(old_val):
+            df.at[edited_row, edit_col] = new_val
+            st.session_state.edited_cells.add((edited_row, edit_col))
+            st.success(f"Cell [{edited_row}, {edit_col}] updated 🔴")
 
-        if edited:
-            st.info("Changes saved. Edited cells will be highlighted red.")
+    # View unconfirmed machines
+    st.subheader("📘 View Unconfirmed Machines")
+    unconfirmed = df[df["CONFIRMED"] != "Y"]
+    st.dataframe(unconfirmed, use_container_width=True)
 
-    st.subheader("➕ Add New Machine")
-    new_data = {}
-    for col in df.columns:
-        new_data[col] = st.text_input(f"New {col}", key=f"new_{col}")
+    # 📤 Save Final Excel with Colors
+    def save_final_with_colors(df, original_uploaded_file, confirmed_rows, new_rows, edited_cells):
+        wb = openpyxl.load_workbook(original_uploaded_file)
+        ws = wb.active
 
-    if st.button("➕ Add Machine"):
-        df.loc[len(df)] = new_data
-        df.at[len(df)-1, 'REMARKS'] = "New entry added"
-        df.at[len(df)-1, 'CONFIRMED'] = "N"
-        st.session_state.new_rows.add(len(df)-1)
-        st.success("New machine added.")
+        # Remove unnamed columns in Excel too
+        clean_columns = [col for col in df.columns if not col.lower().startswith("unnamed")]
+        df = df[clean_columns]
 
-    st.subheader("👀 Unmarked Machines")
-    unmarked = df[df["CONFIRMED"] != "Y"]
-    st.dataframe(unmarked, use_container_width=True)
+        # Rewrite updated rows to Excel
+        for r_idx, row in enumerate(dataframe_to_rows(df, index=False, header=True), start=1):
+            for c_idx, value in enumerate(row, start=1):
+                cell = ws.cell(row=r_idx, column=c_idx, value=value)
 
-    # Save Final Colored Sheet
-    output = BytesIO()
-    writer = pd.ExcelWriter(output, engine='xlsxwriter')
-    df.to_excel(writer, index=False, sheet_name='Inventory')
-    workbook = writer.book
-    worksheet = writer.sheets['Inventory']
+                # Coloring
+                if r_idx == 1:
+                    continue  # Skip header row
+                row_index = r_idx - 2
+                col_name = df.columns[c_idx - 1]
 
-    green_fmt = workbook.add_format({'bg_color': '#C6EFCE'})
-    blue_fmt = workbook.add_format({'bg_color': '#ADD8E6'})
-    red_fmt = workbook.add_format({'bg_color': '#FFC7CE'})
+                if row_index in confirmed_rows:
+                    cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+                elif row_index in new_rows:
+                    cell.fill = PatternFill(start_color="ADD8E6", end_color="ADD8E6", fill_type="solid")
+                if (row_index, col_name) in edited_cells:
+                    cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 
-    for i, row in df.iterrows():
-        fmt_row = None
-        if i in st.session_state.confirmed_rows:
-            fmt_row = green_fmt
-        elif i in st.session_state.new_rows:
-            fmt_row = blue_fmt
+        final_output = BytesIO()
+        wb.save(final_output)
+        final_output.seek(0)
+        return final_output
 
-        if fmt_row:
-            worksheet.set_row(i + 1, None, fmt_row)
-
-        for j, col in enumerate(df.columns):
-            if (i, col) in st.session_state.edited_cells:
-                worksheet.write(i + 1, j, row[col], red_fmt)
-
-    writer.close()
-    output.seek(0)
-
-    final_name = f"FINAL {original_filename}.xlsx"
-    st.download_button("💾 Download FINAL Sheet", output, file_name=final_name)
+    st.subheader("💾 Download Final Excel Sheet")
+    original_filename = uploaded_file.name.replace(".xlsx", "")
+    final_output = save_final_with_colors(df, uploaded_file, st.session_state.confirmed_rows, st.session_state.new_rows, st.session_state.edited_cells)
+    st.download_button("📥 Download FINAL Sheet", final_output, file_name=f"FINAL {original_filename}.xlsx")
